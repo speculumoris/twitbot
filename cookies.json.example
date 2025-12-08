@@ -1,0 +1,20 @@
+[
+    {
+        "name": "auth_token",
+        "value": "YOUR_AUTH_TOKEN_HERE",
+        "domain": ".x.com",
+        "path": "/",
+        "secure": true,
+        "httpOnly": true,
+        "sameSite": "None"
+    },
+    {
+        "name": "ct0",
+        "value": "YOUR_CT0_HERE",
+        "domain": ".x.com",
+        "path": "/",
+        "secure": true,
+        "httpOnly": false,
+        "sameSite": "Lax"
+    }
+]

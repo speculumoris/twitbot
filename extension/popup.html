@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <style>
+        body {
+            width: 250px;
+            padding: 20px;
+            font-family: 'Segoe UI', sans-serif;
+            text-align: center;
+            color: #333;
+        }
+
+        h3 {
+            margin-top: 0;
+            color: #1da1f2;
+        }
+
+        .status-box {
+            background: #f5f8fa;
+            border: 1px solid #e1e8ed;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 15px;
+        }
+
+        .status-indicator {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background-color: #ccc;
+            margin-right: 5px;
+        }
+
+        .connected {
+            background-color: #17bf63;
+        }
+
+        .error {
+            background-color: #e0245e;
+        }
+
+        #lastSync {
+            font-size: 11px;
+            color: #888;
+            margin-top: 5px;
+        }
+
+        button {
+            background: #1da1f2;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-weight: bold;
+            cursor: pointer;
+            margin-top: 15px;
+            font-size: 12px;
+            width: 100%;
+        }
+
+        button:hover {
+            background: #0c7abf;
+        }
+
+        input {
+            width: 100%;
+            padding: 8px;
+            margin: 10px 0 0 0;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+    </style>
+</head>
+
+<body>
+    <h3>TwitBot Worker</h3>
+
+    <div class="status-box">
+        <div>
+            <span id="indicator" class="status-indicator"></span>
+            <span id="statusText">Checking...</span>
+        </div>
+        <div id="lastSync"></div>
+    </div>
+
+    <!-- Hashtag Input -->
+    <div style="text-align: left; font-size: 12px; margin-top: 10px; color: #666;">Queries (comma separated):</div>
+    <div style="text-align: left; font-size: 10px; color: #999; margin-bottom: 5px;">
+        Examples: <i>#Bitcoin, from:ElonMusk, AI</i>
+    </div>
+    <textarea id="keywordsInput" rows="3" placeholder="#AI, from:ElonMusk"
+        style="width: 100%; padding: 8px; margin: 0; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; resize: none;"></textarea>
+
+    <div style="display: flex; align-items: center; justify-content: center; margin-top: 10px;">
+        <input type="checkbox" id="schedulerToggle" style="width: auto; margin-right: 8px;">
+        <label for="schedulerToggle" style="font-size: 12px; cursor: pointer;">Enable 5-min Scheduler</label>
+    </div>
+
+    <button id="forceSync">Start Manual Crawl</button>
+
+    <script src="popup.js"></script>
+</body>
+
+</html>
