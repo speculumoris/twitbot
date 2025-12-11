@@ -4,7 +4,8 @@ import { exec } from 'child_process';
 import open from 'open';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { saveAccount, saveTweet } from './db.js';
+import { saveAccount, saveTweet, getPendingTweets, updateTweetStatus } from './db.js';
+import { initTelegramBot, testTelegramBot, isTelegramEnabled, sendTweetToTelegram } from './telegram.js';
 
 const app = express();
 const PORT = 3000;
@@ -84,10 +85,12 @@ app.post('/save-tweets', async (req, res) => {
         return res.status(400).send('Invalid data');
     }
 
-    console.log(`Received ${tweets.length} tweets from Extension.`);
+    // SERVER-SIDE SAFEGUARD: Force max 20 tweets per batch
+    const limitedTweets = tweets.slice(0, 20);
+    console.log(`Received ${tweets.length} tweets from Extension. Processing ${limitedTweets.length}.`);
 
     try {
-        for (const t of tweets) {
+        for (const t of limitedTweets) {
             await saveTweet(t);
         }
         console.log('Tweets saved to MongoDB.');
@@ -98,6 +101,39 @@ app.post('/save-tweets', async (req, res) => {
     }
 });
 
+// Health check endpoint
+app.get('/health', async (req, res) => {
+    const health = {
+        status: 'ok',
+        timestamp: new Date().toISOString(),
+        uptime: process.uptime(),
+        checks: {
+            mongodb: 'unknown',
+            telegram: 'unknown'
+        }
+    };
+
+    // Check MongoDB
+    try {
+        if (mongoose.connection.readyState === 1) {
+            await mongoose.connection.db.admin().ping();
+            health.checks.mongodb = 'connected';
+        } else {
+            health.checks.mongodb = 'disconnected';
+            health.status = 'degraded';
+        }
+    } catch (e) {
+        health.checks.mongodb = 'error';
+        health.status = 'degraded';
+    }
+
+    // Check Telegram
+    health.checks.telegram = isTelegramEnabled ? 'enabled' : 'disabled';
+
+    const statusCode = health.status === 'ok' ? 200 : 503;
+    res.status(statusCode).json(health);
+});
+
 // 2. Receive cookies from the browser (Used for sync status check only now)
 app.post('/receive-cookies', (req, res) => {
     // We don't save cookies anymore for security reasons.
@@ -106,7 +142,80 @@ app.post('/receive-cookies', (req, res) => {
     res.json({ success: true, message: 'Connected.' });
 });
 
+// API endpoint to check Telegram status
+app.get('/telegram-status', (req, res) => {
+    res.json({
+        enabled: isTelegramEnabled,
+        message: isTelegramEnabled ? 'Telegram bot is active' : 'Telegram bot is not configured'
+    });
+});
+
+// API endpoint to test Telegram connection
+app.post('/test-telegram', async (req, res) => {
+    if (!isTelegramEnabled) {
+        return res.status(400).json({ success: false, message: 'Telegram bot not configured' });
+    }
+
+    const success = await testTelegramBot();
+    res.json({ success, message: success ? 'Test message sent!' : 'Failed to send test message' });
+});
+
 app.listen(PORT, () => {
     console.log(`Setup server running at http://localhost:${PORT}`);
+
+    // Initialize Telegram bot
+    const telegramInitialized = initTelegramBot();
+    if (telegramInitialized) {
+        console.log('[Server] Telegram integration is ACTIVE');
+        startTelegramWorker();
+    } else {
+        console.log('[Server] Telegram integration is DISABLED (no config found)');
+    }
+
     open(`http://localhost:${PORT}`);
 });
+
+// TELEGRAM BACKGROUND WORKER
+let isWorkerRunning = false;
+
+async function startTelegramWorker() {
+    console.log('[Worker] Starting Telegram background worker...');
+
+    // Run every 5 seconds
+    setInterval(async () => {
+        if (isWorkerRunning) return;
+        isWorkerRunning = true;
+
+        try {
+            // Get pending tweets (batch of 5)
+            const pendingTweets = await getPendingTweets(5);
+
+            if (pendingTweets.length > 0) {
+                console.log(`[Worker] Found ${pendingTweets.length} pending tweets to send.`);
+
+                for (const tweet of pendingTweets) {
+                    try {
+                        const success = await sendTweetToTelegram(tweet);
+
+                        if (success) {
+                            await updateTweetStatus(tweet._id, 'sent');
+                        } else {
+                            await updateTweetStatus(tweet._id, 'failed', 'Send failed');
+                        }
+
+                        // Wait 2s between messages to respect rate limits
+                        await new Promise(r => setTimeout(r, 2000));
+
+                    } catch (err) {
+                        console.error(`[Worker] Error sending tweet ${tweet._id}:`, err);
+                        await updateTweetStatus(tweet._id, 'failed', err.message);
+                    }
+                }
+            }
+        } catch (error) {
+            console.error('[Worker] Error in worker loop:', error);
+        } finally {
+            isWorkerRunning = false;
+        }
+    }, 5000); // Check every 5 seconds
+}

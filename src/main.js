@@ -20,7 +20,7 @@ async function main() {
     }
 
     const crawler = new PlaywrightCrawler({
-        headless: false,
+        headless: true,
         useSessionPool: true,
         persistCookiesPerSession: true,
 

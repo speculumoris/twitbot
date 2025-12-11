@@ -1,99 +1,104 @@
-// crawler_content.js
-// This script runs INSIDE the Twitter page
-
 (async function () {
-    console.log('[TwitBot v1.1] Crawler started. Limit: 15 tweets.');
+    // ------------------------------------------------------------------
+    // SINGLETON CHECK (Simple Version)
+    // Prevents multiple crawlers from running effectively
+    // ------------------------------------------------------------------
+    const MY_INSTANCE_ID = Date.now();
+    window.TWITBOT_INSTANCE_ID = MY_INSTANCE_ID;
 
-    const MAX_TWEETS = 15; // Updated to be faster
-    const collectedTweets = new Map(); // Use Map for dedup by URL
+    console.log(`[TwitBot v2.2] Crawler started. Limit: 20 tweets.`);
 
-    // Helper to send logs to background
-    const log = (msg) => chrome.runtime.sendMessage({ type: 'log', message: msg });
+    const MAX_TWEETS = 20;
+    const MAX_ITERATIONS = 15;
+    const MAX_NO_NEW_TWEETS = 2;
+    const collectedTweets = new Map();
 
-    // Helper to extract tweets from current DOM
+    const log = (msg) => {
+        if (window.TWITBOT_INSTANCE_ID === MY_INSTANCE_ID) {
+            chrome.runtime.sendMessage({ type: 'log', message: msg });
+        }
+    };
+
     function extractTweets() {
         const articles = document.querySelectorAll('article[data-testid="tweet"]');
         let count = 0;
 
         for (const tweet of articles) {
-            // Strict Limit Check
+            // STOP CHECK 1: Instance replaced?
+            if (window.TWITBOT_INSTANCE_ID !== MY_INSTANCE_ID) break;
+
+            // STOP CHECK 2: Limit reached?
             if (collectedTweets.size >= MAX_TWEETS) break;
 
             try {
-                const textElement = tweet.querySelector('div[data-testid="tweetText"]');
-                const timeElement = tweet.querySelector('time');
-                const userElement = tweet.querySelector('div[data-testid="User-Name"]');
+                // Ad Check
+                if (/Promoted|Advertisement/i.test(tweet.innerText)) continue;
+
                 const linkElement = tweet.querySelector('a[href*="/status/"]');
+                if (!linkElement) continue;
 
-                if (linkElement && timeElement) {
-                    const url = `https://x.com${linkElement.getAttribute('href')}`;
+                const url = `https://x.com${linkElement.getAttribute('href')}`;
 
-                    if (!collectedTweets.has(url)) {
-                        collectedTweets.set(url, {
-                            text: textElement ? textElement.innerText : '',
-                            author: userElement ? userElement.innerText.split('\n')[0] : 'Unknown',
-                            url: url,
-                            created_at: timeElement.getAttribute('datetime'),
-                            hashtag: window.TWITBOT_HASHTAG || '#AI'
-                        });
-                        count++;
-                    }
+                if (!collectedTweets.has(url)) {
+                    collectedTweets.set(url, {
+                        text: tweet.innerText,
+                        url: url,
+                        created_at: new Date().toISOString(),
+                        hashtag: window.TWITBOT_HASHTAG || '#AI',
+                        mediaUrl: tweet.querySelector('img[src*="media"]')?.src || null
+                    });
+                    count++;
                 }
-            } catch (e) {
-                // ignore
-            }
+            } catch (e) { }
         }
         return count;
     }
 
-    // Main Loop
-    let noNewTweetCount = 0;
+    async function humanLikeScroll() {
+        const targetScroll = 600 + Math.random() * 800;
+        let currentScroll = 0;
 
-    while (collectedTweets.size < MAX_TWEETS) {
-        const initialSize = collectedTweets.size;
-        extractTweets();
+        while (currentScroll < targetScroll) {
+            // CRITICAL FIX: STOP Scrolling properly if limit reached!
+            if (collectedTweets.size >= MAX_TWEETS) return;
+            if (window.TWITBOT_INSTANCE_ID !== MY_INSTANCE_ID) return;
 
-        if (collectedTweets.size >= MAX_TWEETS) break;
+            window.scrollBy(0, 100);
+            currentScroll += 100;
 
-        if (collectedTweets.size === initialSize) {
-            noNewTweetCount++;
-        } else {
-            noNewTweetCount = 0;
+            // Fast scroll
+            await new Promise(r => setTimeout(r, 100 + Math.random() * 100));
         }
-
-        // If no new tweets parsing...
-        if (noNewTweetCount > 5) {
-            log('No new tweets found for a while. Stopping.');
-            break;
-        }
-
-        // Human-like Scrolling
-        // Random Scroll Amount
-        const scrollAmount = 500 + Math.random() * 800;
-        window.scrollBy(0, scrollAmount);
-
-        // Occasional "micro-read"
-        if (Math.random() < 0.3) {
-            setTimeout(() => {
-                window.scrollBy(0, -100 - Math.random() * 200);
-            }, 500);
-        }
-
-        // Wait Time (Adjusted to 3-7 seconds for better balance)
-        const waitTime = 3000 + Math.random() * 4000;
-        log(`Collected ${collectedTweets.size}/${MAX_TWEETS}. Waiting ${Math.round(waitTime / 1000)}s...`);
-
-        await new Promise(r => setTimeout(r, waitTime));
+        await new Promise(r => setTimeout(r, 1000));
     }
 
-    // Finished
-    const finalTweets = Array.from(collectedTweets.values()).slice(0, MAX_TWEETS);
-    log(`Scraping finished. Sending ${finalTweets.length} tweets to server...`);
+    // MAIN LOOP
+    let iterations = 0;
+    while (collectedTweets.size < MAX_TWEETS && iterations < MAX_ITERATIONS) {
+        if (window.TWITBOT_INSTANCE_ID !== MY_INSTANCE_ID) return;
 
-    // Send to Background to forward to Server
-    chrome.runtime.sendMessage({
-        type: 'tweets_collected',
-        tweets: finalTweets
-    });
+        iterations++;
+        log(`Scanning... (${collectedTweets.size}/${MAX_TWEETS})`);
+
+        extractTweets();
+
+        // STOP IMMEDIATELY if limit reached
+        if (collectedTweets.size >= MAX_TWEETS) break;
+
+        log('Scrolling...');
+        await humanLikeScroll();
+    }
+
+    // SEND RESULTS
+    if (window.TWITBOT_INSTANCE_ID === MY_INSTANCE_ID) {
+        // Enforce Hard Limit of 20
+        const finalTweets = Array.from(collectedTweets.values()).slice(0, 20);
+        log(`✅ Done. Sending ${finalTweets.length} tweets.`);
+
+        chrome.runtime.sendMessage({
+            type: 'tweets_collected',
+            tweets: finalTweets
+        });
+    }
 
 })();

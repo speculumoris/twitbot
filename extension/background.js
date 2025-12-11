@@ -1,10 +1,13 @@
 // Configuration
+console.log('BACKGROUND SCRIPT V2.0 (Strict 20 Limit) LOADED');
 const SERVER_URL = 'http://localhost:3000';
 // We will use 2 endpoints: /log and /save-tweets
 
 let crawlerWindowId = null;
+let crawlerTabId = null; // Track the tab ID specifically
 let keywordQueue = [];
 let isCrawling = false;
+let currentInjectionListener = null;
 
 // 1. Listen for messages
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
@@ -23,6 +26,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     // MANUAL QUEUE START
     if (request.action === 'startManualQueue') {
         const keywords = request.keywords.split(',').map(k => k.trim()).filter(k => k);
+        const userId = request.userId;
+
+        // Store userId for this crawl session
+        if (userId) chrome.storage.local.set({ currentUserId: userId });
+
         addToQueue(keywords);
     }
 
@@ -34,19 +42,20 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     // RESULTS (From Content Script)
     if (request.type === 'tweets_collected') {
         console.log('Received tweets from content script. Saving...');
-        saveTweetsToServer(request.tweets);
+        saveTweetsToServer(request.tweets).then(() => {
+            // Finished this keyword
+            isCrawling = false;
 
-        // Close the ghost window
-        if (crawlerWindowId) {
-            chrome.windows.remove(crawlerWindowId);
-            crawlerWindowId = null;
-        }
-
-        // Finished this keyword
-        isCrawling = false;
-
-        // Process next item in queue
-        processQueue();
+            // SMART QUEUE: Only close if queue is empty
+            if (keywordQueue.length === 0) {
+                console.log('Queue empty. Closing crawler window.');
+                closeCrawlerWindow();
+                chrome.storage.local.set({ status: 'Idle', lastSync: new Date().toISOString() });
+            } else {
+                console.log('Queue has more items. Continuing in same window...');
+                processQueue();
+            }
+        });
     }
 });
 
@@ -65,23 +74,29 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 
 function addToQueue(keywords) {
     console.log('Adding to queue:', keywords);
-    // Add only if not already in queue to avoid duplicates piling up? 
-    // Or just push them. Let's push them.
     keywordQueue.push(...keywords);
     processQueue();
 }
 
 function processQueue() {
     if (isCrawling) return; // Already busy
+
     if (keywordQueue.length === 0) {
         console.log('Queue empty. All done.');
-        chrome.storage.local.set({ status: 'Idle', lastSync: new Date().toISOString() });
         return;
     }
 
     const nextKeyword = keywordQueue.shift();
     console.log('Starting crawl for:', nextKeyword);
     startCrawling(nextKeyword);
+}
+
+function closeCrawlerWindow() {
+    if (crawlerWindowId) {
+        chrome.windows.remove(crawlerWindowId).catch(() => { });
+        crawlerWindowId = null;
+        crawlerTabId = null;
+    }
 }
 
 async function startCrawling(hashtag) {
@@ -95,49 +110,99 @@ async function startCrawling(hashtag) {
 
     chrome.storage.local.set({ status: `Crawling ${hashtag}...` });
 
-    // Create a MINIMIZED window (Stealth Mode)
-    // 'minimized' state makes it appear in dock/taskbar but not on screen
-    const win = await chrome.windows.create({
-        url: searchUrl,
-        state: 'minimized',
-        focused: false
-    });
+    // CHECK IF WINDOW EXISTS
+    let win = null;
+    if (crawlerWindowId) {
+        try {
+            win = await chrome.windows.get(crawlerWindowId);
+        } catch (e) {
+            crawlerWindowId = null; // Window was closed manually
+        }
+    }
 
-    crawlerWindowId = win.id;
+    if (crawlerWindowId && win) {
+        // REUSE WINDOW
+        console.log('Reusing existing crawler window...');
+        chrome.tabs.update(crawlerTabId, { url: searchUrl });
+        setupInjectionListener(crawlerTabId, hashtag);
+    } else {
+        // CREATE NEW WINDOW
+        console.log('Creating new crawler window...');
+        // Create an "Off-Screen" window (Ghost Mode)
+        // We position it far outside the monitor so the user can't see/click it
+        const newWin = await chrome.windows.create({
+            url: searchUrl,
+            width: 1280,
+            height: 800,
+            left: 10000,
+            top: 10000,
+            focused: false,
+            state: 'normal'
+        });
+        crawlerWindowId = newWin.id;
+        // Get the tab ID (usually first tab in new window)
+        const tabs = await chrome.tabs.query({ windowId: crawlerWindowId });
+        crawlerTabId = tabs[0].id;
 
-    // We need to wait for the page to load before injecting
-    // We'll use a listener on tab updates
-    chrome.tabs.onUpdated.addListener(function listener(tabId, changeInfo, tab) {
-        if (tab.windowId === win.id && changeInfo.status === 'complete') {
+        setupInjectionListener(crawlerTabId, hashtag);
+    }
+}
 
-            // Remove listener so we don't inject twice
-            chrome.tabs.onUpdated.removeListener(listener);
+// Reusable listener setup
+function setupInjectionListener(tabId, hashtag) {
+    // Remove old listener if exists to prevent duplicates
+    if (currentInjectionListener) {
+        chrome.tabs.onUpdated.removeListener(currentInjectionListener);
+    }
+
+    currentInjectionListener = function (tid, changeInfo, tab) {
+        if (tid === tabId && changeInfo.status === 'complete') {
+
+            // Remove listener so we don't inject twice for THIS load
+            chrome.tabs.onUpdated.removeListener(currentInjectionListener);
+            currentInjectionListener = null;
 
             console.log('Target page loaded. Injecting crawler...');
 
-            // Execute script
-            // We first inject the hashtag variable
-            chrome.scripting.executeScript({
-                target: { tabId: tabId },
-                func: (h) => { window.TWITBOT_HASHTAG = h; },
-                args: [hashtag]
-            }).then(() => {
-                // Then run the file
+            setTimeout(() => { // Small delay to ensure render
                 chrome.scripting.executeScript({
                     target: { tabId: tabId },
-                    files: ['crawler_content.js']
+                    func: (h) => { window.TWITBOT_HASHTAG = h; },
+                    args: [hashtag]
+                }).then(() => {
+                    chrome.scripting.executeScript({
+                        target: { tabId: tabId },
+                        files: ['crawler_content.js']
+                    }).catch(err => console.error('Injection failed:', err));
                 });
-            });
+            }, 1000);
         }
-    });
+    };
+
+    chrome.tabs.onUpdated.addListener(currentInjectionListener);
 }
 
 async function saveTweetsToServer(tweets) {
     try {
-        const response = await fetch(`${SERVER_URL}/save-tweets`, {
+        if (tweets.length > 25) {
+            console.error(`[Security Block] Received ${tweets.length} tweets! This violates the limit. Truncating hard.`);
+        }
+
+        // Limit to 20 tweets maximum
+        const limitedTweets = tweets.slice(0, 20);
+        console.log(`Sending ${limitedTweets.length} tweets to server (limited from ${tweets.length})`);
+
+        // Get userId from storage
+        const { currentUserId } = await chrome.storage.local.get(['currentUserId']);
+        let url = `${SERVER_URL}/save-tweets`;
+        if (currentUserId) {
+            url += `?userId=${encodeURIComponent(currentUserId)}`;
+        }
+
+        const response = await fetch(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ tweets })
+            body: JSON.stringify({ tweets: limitedTweets })
         });
 
         if (!response.ok) {
